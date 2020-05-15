@@ -1443,6 +1443,12 @@ const char* ndpi_risk2str(ndpi_risk risk) {
   case NDPI_TLS_WEAK_CIPHER:
     return("Weak TLS cipher");
 
+  case NDPI_TLS_CERTIFICATE_EXPIRED:
+    return("TLS Expired Certificate");
+    
+  case NDPI_TLS_CERTIFICATE_MISMATCH:
+    return("TLS Certificate Mismatch");
+    
   default:  
     return("");
   }
