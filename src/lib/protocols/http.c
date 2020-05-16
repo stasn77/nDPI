@@ -27,8 +27,43 @@
 
 #include "ndpi_api.h"
 
+static const char* binary_file_mimes[] = {
+  "exe",
+  "vnd.ms-cab-compressed",
+  "vnd.microsoft.portable-executable"
+  "x-msdownload",
+  "x-dosexec",
+  NULL
+};
+
+static const char* binary_file_ext[] = {
+  ".exe",
+  ".msi",
+  ".cab",
+  NULL
+};
+
 static void ndpi_search_http_tcp(struct ndpi_detection_module_struct *ndpi_struct,
 				 struct ndpi_flow_struct *flow);
+
+/* *********************************************** */
+
+static void ndpi_analyze_content_signature(struct ndpi_flow_struct *flow) { 
+  if((flow->initial_binary_bytes_len >= 2) && (flow->initial_binary_bytes[0] == 0x4D) && (flow->initial_binary_bytes[1] == 0x5A))
+    NDPI_SET_BIT_16(flow->risk, NDPI_BINARY_APPLICATION_TRANSFER); /* Win executable */
+  else if((flow->initial_binary_bytes_len >= 4) && (flow->initial_binary_bytes[0] == 0x7F) && (flow->initial_binary_bytes[1] == 'E')
+	  && (flow->initial_binary_bytes[2] == 'L') && (flow->initial_binary_bytes[3] == 'F'))
+    NDPI_SET_BIT_16(flow->risk, NDPI_BINARY_APPLICATION_TRANSFER); /* Linux executable */
+  else if((flow->initial_binary_bytes_len >= 4) && (flow->initial_binary_bytes[0] == 0xCF) && (flow->initial_binary_bytes[1] == 0xFA)
+	  && (flow->initial_binary_bytes[2] == 0xED) && (flow->initial_binary_bytes[3] == 0xFE))
+    NDPI_SET_BIT_16(flow->risk, NDPI_BINARY_APPLICATION_TRANSFER); /* Linux executable */
+  else if(flow->initial_binary_bytes_len >= 8) {
+    u_int8_t exec_pattern[] = { 0x64, 0x65, 0x78, 0x0A, 0x30, 0x33, 0x35, 0x00 };
+    
+    if(memcmp(flow->initial_binary_bytes, exec_pattern, 8) == 0)
+      NDPI_SET_BIT_16(flow->risk, NDPI_BINARY_APPLICATION_TRANSFER); /* Dalvik Executable (Android) */
+  }
+}
 
 /* *********************************************** */
 
@@ -40,8 +75,12 @@ static int ndpi_search_http_tcp_again(struct ndpi_detection_module_struct *ndpi_
   printf("=> %s()\n", __FUNCTION__);
 #endif
 
-  if((flow->host_server_name[0] != '\0') && (flow->http.response_status_code != 0)) {
+  if((flow->host_server_name[0] != '\0')
+     && (flow->http.response_status_code != 0)
+     ) {
     /* stop extra processing */
+    
+    if(flow->initial_binary_bytes_len) ndpi_analyze_content_signature(flow);
     flow->extra_packets_func = NULL; /* We're good now */
     return(0);
   }
@@ -56,18 +95,47 @@ static int ndpi_search_http_tcp_again(struct ndpi_detection_module_struct *ndpi_
 static ndpi_protocol_category_t ndpi_http_check_content(struct ndpi_detection_module_struct *ndpi_struct,
 							struct ndpi_flow_struct *flow) {
   struct ndpi_packet_struct *packet = &flow->packet;
+  int i;
 
   if(packet->content_line.len > 0) {
     u_int app_len = sizeof("application");
 
     if(packet->content_line.len > app_len) {
-      if(ndpi_strncasestr((const char *)&packet->content_line.ptr[app_len], "mpeg",
-			  packet->content_line.len-app_len) != NULL) {
+      const char *app = (const char *)&packet->content_line.ptr[app_len];
+      u_int app_len_avail =  packet->content_line.len-app_len;
+       
+      if(ndpi_strncasestr(app, "mpeg", app_len_avail) != NULL) {
 	flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_STREAMING;
 	return(flow->category);
+      } else {
+        for (i = 0; binary_file_mimes[i] != NULL; i++) {
+          if (ndpi_strncasestr(app, binary_file_mimes[i], app_len_avail) != NULL) {
+            flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT;
+            NDPI_SET_BIT_16(flow->risk, NDPI_BINARY_APPLICATION_TRANSFER);
+            NDPI_LOG_INFO(ndpi_struct, "found executable HTTP transfer");
+            return(flow->category);
+          }
+        }
       }
     }
 
+    /* check for attachment */
+  if (packet->content_disposition_line.len > 0) {
+    uint8_t attachment_len = sizeof("attachment; filename");
+    if (packet->content_disposition_line.len > attachment_len) {
+      uint8_t filename_len = packet->content_disposition_line.len - attachment_len;
+      for (i = 0; binary_file_ext[i] != NULL; i++) {
+        if (ndpi_strncasestr((const char*)&packet->content_disposition_line.ptr[attachment_len],
+            binary_file_ext[i], filename_len)) {
+          printf("got %s\n", binary_file_ext[i]);
+          flow->guessed_category = flow->category = NDPI_PROTOCOL_CATEGORY_DOWNLOAD_FT;
+          NDPI_SET_BIT_16(flow->risk, NDPI_BINARY_APPLICATION_TRANSFER);
+          NDPI_LOG_INFO(ndpi_struct, "found executable HTTP transfer");
+          return(flow->category);
+        }
+      }
+    }
+  }
     switch(packet->content_line.ptr[0]) {
     case 'a':
       if(strncasecmp((const char *)packet->content_line.ptr, "audio",
@@ -182,28 +250,7 @@ static void check_content_type_and_change_protocol(struct ndpi_detection_module_
   if(flow->http_detected && (flow->http.response_status_code != 0))
     return;
 
-#if defined(NDPI_PROTOCOL_1KXUN) || defined(NDPI_PROTOCOL_IQIYI)
-  /* PPStream */
-  if(flow->l4.tcp.ppstream_stage > 0 && flow->iqiyi_counter == 0) {
-    NDPI_LOG_INFO(ndpi_struct, "found PPStream\n");
-    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_PPSTREAM,
-			       NDPI_PROTOCOL_HTTP, NDPI_PROTOCOL_CATEGORY_STREAMING);
-  } else if(flow->iqiyi_counter > 0) {
-    NDPI_LOG_INFO(ndpi_struct, "found iQiyi\n");
-    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_IQIYI,
-			       NDPI_PROTOCOL_HTTP, NDPI_PROTOCOL_CATEGORY_STREAMING);
-  }
-#endif
-
-#if defined(NDPI_PROTOCOL_1KXUN) || defined(NDPI_PROTOCOL_IQIYI)
-  /* 1KXUN */
-  if(flow->kxun_counter > 0) {
-    NDPI_LOG_INFO(ndpi_struct, "found 1kxun\n");
-    ndpi_set_detected_protocol(ndpi_struct, flow, NDPI_PROTOCOL_1KXUN, NDPI_PROTOCOL_CATEGORY_STREAMING);
-  }
-#endif
-
-    if((flow->http.url == NULL)
+  if((flow->http.url == NULL)
        && (packet->http_url_name.len > 0)
        && (packet->host_line.len > 0)) {
       int len = packet->http_url_name.len + packet->host_line.len + 1;
@@ -617,7 +664,8 @@ static void ndpi_check_http_tcp(struct ndpi_detection_module_struct *ndpi_struct
 		  "Found more than one line, we look further for the next packet...\n");
 
     if(packet->line[0].len >= (9 + filename_start)
-       && memcmp(&packet->line[0].ptr[packet->line[0].len - 9], " HTTP/1.", 8) == 0) { /* Request line complete. Ex. "GET / HTTP/1.1" */
+       && memcmp(&packet->line[0].ptr[packet->line[0].len - 9], " HTTP/1.", 8) == 0) {
+      /* Request line complete. Ex. "GET / HTTP/1.1" */
 
       packet->http_url_name.ptr = &packet->payload[filename_start];
       packet->http_url_name.len = packet->line[0].len - (filename_start + 9);
@@ -639,49 +687,6 @@ static void ndpi_check_http_tcp(struct ndpi_detection_module_struct *ndpi_struct
 	 && ndpi_strnstr((const char *)packet->referer_line.ptr, "www.speedtest.net", packet->referer_line.len)) {
 	goto ookla_found;
       }
-
-#if defined(NDPI_PROTOCOL_1KXUN) || defined(NDPI_PROTOCOL_IQIYI)
-      /* check PPStream protocol or iQiyi service
-	 (iqiyi is delivered by ppstream) */
-      // substring in url
-      if(ndpi_strnstr((const char*) &packet->payload[filename_start], "iqiyi.com",
-		      (packet->payload_packet_len - filename_start)) != NULL) {
-	if(flow->kxun_counter == 0) {
-	  flow->l4.tcp.ppstream_stage++;
-	  flow->iqiyi_counter++;
-	  check_content_type_and_change_protocol(ndpi_struct, flow); /* ***** CHECK ****** */
-	  return;
-	}
-      }
-
-      // additional field in http payload
-      x = 1;
-      while((packet->line[x].len >= 4) && (packet->line[x+1].len >= 5) && (packet->line[x+2].len >= 10)) {
-	if(packet->line[x].ptr && ((memcmp(packet->line[x].ptr, "qyid", 4)) == 0)
-	   && packet->line[x+1].ptr && ((memcmp(packet->line[x+1].ptr, "qypid", 5)) == 0)
-	   && packet->line[x+2].ptr && ((memcmp(packet->line[x+2].ptr, "qyplatform", 10)) == 0)
-	   ) {
-	  flow->l4.tcp.ppstream_stage++;
-	  flow->iqiyi_counter++;
-	  check_content_type_and_change_protocol(ndpi_struct, flow);
-	  return;
-	}
-	x++;
-      }
-#endif
-
-#if defined(NDPI_PROTOCOL_1KXUN) || defined(NDPI_PROTOCOL_IQIYI)
-      /* Check for 1kxun packet */
-      for (a = 0; a < packet->parsed_lines; a++) {
-	if(packet->line[a].len >= 14 && (memcmp(packet->line[a].ptr, "Client-Source:", 14)) == 0) {
-	  if((memcmp(packet->line[a].ptr+15, "1kxun", 5)) == 0) {
-	    flow->kxun_counter++;
-	    check_content_type_and_change_protocol(ndpi_struct, flow);
-	    return;
-	  }
-	}
-      }
-#endif
 
       if((packet->http_url_name.len > 7)
 	 && (!strncmp((const char*) packet->http_url_name.ptr, "http://", 7))) {

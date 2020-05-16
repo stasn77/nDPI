@@ -190,13 +190,62 @@ static void cleanupServerName(char *buffer, int buffer_len) {
 
 /* **************************************** */
 
+/*
+  Return code
+  -1: error (buffer too short)
+   0: OK but buffer is not human readeable (so something went wrong)
+   1: OK
+ */
+static int extractRDNSequence(struct ndpi_packet_struct *packet,
+			      u_int offset, char *buffer, u_int buffer_len,
+			      char *rdnSeqBuf, u_int *rdnSeqBuf_offset,
+			      u_int rdnSeqBuf_len,
+			      const char *label) {
+  u_int8_t str_len = packet->payload[offset+4], is_printable = 1;
+  char *str;
+  u_int len, j;
+
+  // packet is truncated... further inspection is not needed
+  if((offset+4+str_len) >= packet->payload_packet_len)
+    return(-1);
+
+  str = (char*)&packet->payload[offset+5];
+
+  len = (u_int)ndpi_min(str_len, buffer_len-1);
+  strncpy(buffer, str, len);
+  buffer[len] = '\0';
+
+  // check string is printable
+  for(j = 0; j < len; j++) {
+    if(!ndpi_isprint(buffer[j])) {
+      is_printable = 0;
+      break;
+    }
+  }
+
+  if(is_printable) {
+    int rc = snprintf(&rdnSeqBuf[*rdnSeqBuf_offset],
+		      rdnSeqBuf_len-(*rdnSeqBuf_offset),
+		      "%s%s=%s", (*rdnSeqBuf_offset > 0) ? ", " : "",
+		      label, buffer);
+
+    if(rc > 0)
+      (*rdnSeqBuf_offset) += rc;
+  }
+  
+  return(is_printable);
+}
+
+/* **************************************** */
+
 /* See https://blog.catchpoint.com/2017/05/12/dissecting-tls-using-wireshark/ */
 static void processCertificateElements(struct ndpi_detection_module_struct *ndpi_struct,
 				       struct ndpi_flow_struct *flow,
 				       u_int16_t p_offset, u_int16_t certificate_len) {
   struct ndpi_packet_struct *packet = &flow->packet;
-  u_int num_found = 0, i, j;
-  char buffer[64] = { '\0' };
+  u_int num_found = 0, i;
+  char buffer[64] = { '\0' }, rdnSeqBuf[1024] = { '\0' };
+  u_int rdn_len = 0;
 
 #ifdef DEBUG_TLS
   printf("[TLS] %s() [offset: %u][certificate_len: %u]\n", __FUNCTION__, p_offset, certificate_len);
@@ -204,53 +253,82 @@ static void processCertificateElements(struct ndpi_detection_module_struct *ndpi
 
   /* Check after handshake protocol header (5 bytes) and message header (4 bytes) */
   for(i = p_offset; i < certificate_len; i++) {
-    /* Organization OID: 2.5.4.10 */
-    if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0a)) {
-      u_int8_t server_len = packet->payload[i+4], is_printable = 1;
-      char *server_org;
-      u_int len;
-
-      num_found++;
-      /* what we want is subject certificate, so we bypass the issuer certificate */
-      if(num_found != 2) continue;
-
-      // packet is truncated... further inspection is not needed
-      if(i+4+server_len >= packet->payload_packet_len) {
-	break;
-      }
-
-      server_org = (char*)&packet->payload[i+5];
-
-      len = (u_int)ndpi_min(server_len, sizeof(buffer)-1);
-      strncpy(buffer, server_org, len);
-      buffer[len] = '\0';
-
-      // check if organization string are all printable
-      is_printable = 1;
-      for(j = 0; j < len; j++) {
-	if(!ndpi_isprint(buffer[j])) {
-	  is_printable = 0;
-	  break;
-	}
-      }
-
-      if(is_printable == 1) {
-	snprintf(flow->protos.stun_ssl.ssl.server_organization,
-		 sizeof(flow->protos.stun_ssl.ssl.server_organization), "%s", buffer);
+    /* 
+       See https://www.ibm.com/support/knowledgecenter/SSFKSJ_7.5.0/com.ibm.mq.sec.doc/q009860_.htm
+       for X.509 certificate labels
+    */
+    if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x03)) {
+      /* Common Name */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "CN");
+      if(rc == -1) break;
+      
 #ifdef DEBUG_TLS
-	printf("Certificate organization: %s\n", flow->protos.stun_ssl.ssl.server_organization);
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Common Name", buffer);
 #endif
-      }
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x06)) {
+      /* Country */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "C");
+      if(rc == -1) break;
+	 
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Country", buffer);
+#endif
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x07)) {
+      /* Locality */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "L");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Locality", buffer);
+#endif
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x08)) {
+      /* State or Province */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "ST");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "State or Province", buffer);
+#endif
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0a)) {
+      /* Organization Name */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "O");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Organization Name", buffer);
+#endif
+
+    } else if((packet->payload[i] == 0x55) && (packet->payload[i+1] == 0x04) && (packet->payload[i+2] == 0x0b)) {
+      /* Organization Unit */
+      int rc = extractRDNSequence(packet, i, buffer, sizeof(buffer), rdnSeqBuf, &rdn_len, sizeof(rdnSeqBuf), "OU");
+      if(rc == -1) break;
+
+#ifdef DEBUG_TLS
+      printf("[TLS] %s() [%s][%s: %s]\n", __FUNCTION__, (num_found == 0) ? "Subject" : "Issuer", "Organization Unit", buffer);
+#endif
     } else if((packet->payload[i] == 0x30) && (packet->payload[i+1] == 0x1e) && (packet->payload[i+2] == 0x17)) {
       /* Certificate Validity */
       u_int8_t len = packet->payload[i+3];
       u_int offset = i+4;
+
+      if(num_found == 0) {
+	num_found++;
+
+#ifdef DEBUG_TLS
+	printf("[TLS] %s() IssuerDN [%s]\n", __FUNCTION__, rdnSeqBuf);
+#endif
+
+	if(rdn_len) flow->protos.stun_ssl.ssl.issuerDN = ndpi_strdup(rdnSeqBuf);
+	rdn_len = 0; /* Reset buffer */
+      }
 
       if((offset+len) < packet->payload_packet_len) {
 #ifndef __KERNEL__
 	char utcDate[32];
 
 #ifdef DEBUG_TLS
+	u_int j;
+	
 	printf("[CERTIFICATE] notBefore [len: %u][", len);
 	for(j=0; j<len; j++) printf("%c", packet->payload[i+4+j]);
 	printf("]\n");
@@ -283,6 +361,8 @@ static void processCertificateElements(struct ndpi_detection_module_struct *ndpi
 	  if((offset+len) < packet->payload_packet_len) {
 #ifndef __KERNEL__
 #ifdef DEBUG_TLS
+	    u_int j;
+	    
 	    printf("[CERTIFICATE] notAfter [len: %u][", len);
 	    for(j=0; j<len; j++) printf("%c", packet->payload[offset+j]);
 	    printf("]\n");
@@ -379,6 +459,16 @@ static void processCertificateElements(struct ndpi_detection_module_struct *ndpi
       } /* while */
     }
   }
+
+  if(rdn_len) flow->protos.stun_ssl.ssl.subjectDN = ndpi_strdup(rdnSeqBuf);
+
+  if(flow->protos.stun_ssl.ssl.subjectDN && flow->protos.stun_ssl.ssl.issuerDN
+     && (!strcmp(flow->protos.stun_ssl.ssl.subjectDN, flow->protos.stun_ssl.ssl.issuerDN)))
+    NDPI_SET_BIT_16(flow->risk, NDPI_TLS_SELFSIGNED_CERTIFICATE);
+      
+#ifdef DEBUG_TLS
+  printf("[TLS] %s() SubjectDN [%s]\n", __FUNCTION__, rdnSeqBuf);
+#endif
 }
 
 /* **************************************** */
@@ -761,7 +851,9 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 
     tls_version = ntohs(*((u_int16_t*)&packet->payload[version_offset]));
     flow->protos.stun_ssl.ssl.ssl_version = ja3.tls_handshake_version = tls_version;
-
+    if(flow->protos.stun_ssl.ssl.ssl_version < 0x0302) /* TLSv1.1 */
+      NDPI_SET_BIT_16(flow->risk, NDPI_TLS_OBSOLETE_VERSION);
+    
     if(handshake_type == 0x02 /* Server Hello */) {
       int i, rc;
 
@@ -784,7 +876,9 @@ int processClientServerHello(struct ndpi_detection_module_struct *ndpi_struct,
 	return(0); /* Not found */
 
       ja3.num_cipher = 1, ja3.cipher[0] = ntohs(*((u_int16_t*)&packet->payload[offset]));
-      flow->protos.stun_ssl.ssl.server_unsafe_cipher = ndpi_is_safe_ssl_cipher(ja3.cipher[0]);
+      if((flow->protos.stun_ssl.ssl.server_unsafe_cipher = ndpi_is_safe_ssl_cipher(ja3.cipher[0])) == 1)
+	NDPI_SET_BIT_16(flow->risk, NDPI_TLS_WEAK_CIPHER);
+      
       flow->protos.stun_ssl.ssl.server_cipher = ja3.cipher[0];
 
 #ifdef DEBUG_TLS

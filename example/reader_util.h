@@ -194,13 +194,14 @@ typedef struct ndpi_flow_info {
   char host_server_name[240];
   char bittorent_hash[41];
   char dhcp_fingerprint[48];
-
+  ndpi_risk risk;
+  
   struct {
     u_int16_t ssl_version;
     char client_requested_server_name[64], server_info[64],
       client_hassh[33], server_hassh[33], *server_names,
       *tls_alpn, *tls_supported_versions,
-      server_organization[64],
+      *tls_issuerDN, *tls_subjectDN,
       ja3_client[33], ja3_server[33],
       sha1_cert_fingerprint[20];
     u_int8_t sha1_cert_fingerprint_set;

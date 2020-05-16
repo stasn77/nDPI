@@ -96,10 +96,16 @@ extern "C" {
    */
   u_int32_t ndpi_detection_get_sizeof_ndpi_flow_udp_struct(void);
 
+  /*
+    Same as the API call above but used for matching raw id's added
+    via ndpi_add_string_value_to_automa()
+  */
+  int ndpi_match_string_value(void *_automa, char *string_to_match,
+			      u_int match_len, u_int32_t *num);
 
   /**
    * nDPI personal allocation and free functions
-  **/
+   **/
   void * ndpi_malloc(size_t size);
   void * ndpi_calloc(unsigned long count, size_t size);
   void * ndpi_realloc(void *ptr, size_t old_size, size_t new_size);
@@ -144,6 +150,21 @@ extern "C" {
    */
   u_int16_t ndpi_network_ptree_match(struct ndpi_detection_module_struct *ndpi_struct,
 				     struct in_addr *pin);
+
+  /**
+   * Returns the nDPI protocol id for IP+port-based protocol detection
+   *
+   * @par    ndpi_struct  = the struct created for the protocol detection
+   * @par    pin          = IP host address (MUST BE in network byte order):
+   *                        See man(7) ip for details
+   * @par    port         = The port (MUST BE in network byte order) or
+   *                        0 if ignored
+   * @return the nDPI protocol ID
+   *
+   */
+  u_int16_t ndpi_network_port_ptree_match(struct ndpi_detection_module_struct *ndpi_struct,
+					  struct in_addr *pin /* network byte order */,
+					  u_int16_t port /* network byte order */);
 
   /**
    * Init single protocol match
@@ -766,7 +787,7 @@ extern "C" {
    * @return  0 in case of no error, or -1 if an error occurred.
    *
    */
-  int ndpi_add_string_value_to_automa(void *_automa, char *str, unsigned long num);
+  int ndpi_add_string_value_to_automa(void *_automa, char *str, u_int32_t num);
 
   /**
    * Add a string to match to an automata. Same as ndpi_add_string_value_to_automa() with num set to 1
@@ -819,9 +840,10 @@ extern "C" {
 				 u_int32_t daddr,
 				 ndpi_protocol *ret);
   int ndpi_match_custom_category(struct ndpi_detection_module_struct *ndpi_struct,
-				 char *name, u_int name_len, unsigned long *id);
+				 char *name, u_int name_len, ndpi_protocol_category_t *id);
   int ndpi_get_custom_category_match(struct ndpi_detection_module_struct *ndpi_struct,
-				     char *name_or_ip, u_int name_len, unsigned long *id);
+				     char *name_or_ip, u_int name_len,
+				     ndpi_protocol_category_t *id);
 #endif
   void ndpi_fill_protocol_category(struct ndpi_detection_module_struct *ndpi_struct,
 				   struct ndpi_flow_struct *flow,
@@ -848,16 +870,19 @@ extern "C" {
   void ndpi_lru_add_to_cache(struct ndpi_lru_cache *c, u_int32_t key, u_int16_t value);
   
   /**
-   * Add a string to match to an automata
+   * Find a protocol id associated with a string automata
    *
    * @par     The automata initialized with ndpi_init_automa();
    * @par     The (sub)string to search
    * @par     The (sub)string length
-   * @par     The id associated with the matched string or 0 id not found.
+   * @par     The protocol id associated with the matched string or 0 id not found.
    * @return  0 in case of match, or -1 if no match, or -2 if an error occurred.
    *
    */
-  int ndpi_match_string_id(void *_automa, char *string_to_match, u_int match_len, unsigned long *id);
+  int ndpi_match_string_protocol_id(void *_automa, char *string_to_match, u_int match_len,
+				    u_int16_t *protocol_id,
+				    ndpi_protocol_category_t *category,
+				    ndpi_protocol_breed_t *breed);
 
   int ndpi_handle_rule(struct ndpi_detection_module_struct *ndpi_str, char *rule, u_int8_t do_add);
 
@@ -1024,11 +1049,13 @@ extern "C" {
   
   void ndpi_data_print_window_values(struct ndpi_analyze_struct *s); /* debug */
 
-  ndpi_url_risk ndpi_validate_url(char *url);
+  ndpi_risk ndpi_validate_url(char *url);
 
   u_int8_t ndpi_is_protocol_detected(struct ndpi_detection_module_struct *ndpi_str,
 				     ndpi_protocol proto);
 #endif
+
+  const char* ndpi_risk2str(ndpi_risk risk);
 #ifdef __cplusplus
 }
 #endif

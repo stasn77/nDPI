@@ -57,11 +57,19 @@ typedef enum {
 } ndpi_packet_tunnel;
 
 typedef enum {
-  ndpi_url_no_problem = 0,
-  ndpi_url_possible_xss,
-  ndpi_url_possible_sql_injection,
-  ndpi_url_possible_rce_injection
-} ndpi_url_risk;
+  NDPI_NO_RISK = 0,
+  NDPI_URL_POSSIBLE_XSS,
+  NDPI_URL_POSSIBLE_SQL_INJECTION,
+  NDPI_URL_POSSIBLE_RCE_INJECTION,
+  NDPI_BINARY_APPLICATION_TRANSFER,
+  NDPI_KNOWN_PROTOCOL_ON_NON_STANDARD_PORT,
+  NDPI_TLS_SELFSIGNED_CERTIFICATE,
+  NDPI_TLS_OBSOLETE_VERSION,
+  NDPI_TLS_WEAK_CIPHER,
+
+  /* Leave this as last member */
+  NDPI_MAX_RISK
+} ndpi_risk;
 
 /* NDPI_VISIT */
 typedef enum {
@@ -823,19 +831,20 @@ struct ndpi_packet_struct {
 #define forwarded_line_idx (2)
 #define referer_line_idx (3)
 #define content_line_idx (4)
-#define accept_line_idx (5)
-#define user_agent_line_idx (6)
-#define http_url_name_idx (7)
-#define http_encoding_idx (8)
-#define http_transfer_encoding_idx (9)
-#define http_contentlen_idx (10)
-#define http_cookie_idx (11)
-#define http_origin_idx (12)
-#define http_x_session_type_idx (13)
-#define server_line_idx (14)
-#define http_method_idx (15)
-#define http_response_idx (16)
-#define last_hdr_idx (17)
+#define content_disposition_line_idx (5)
+#define accept_line_idx (6)
+#define user_agent_line_idx (7)
+#define http_url_name_idx (8)
+#define http_encoding_idx (9)
+#define http_transfer_encoding_idx (10)
+#define http_contentlen_idx (11)
+#define http_cookie_idx (12)
+#define http_origin_idx (13)
+#define http_x_session_type_idx (14)
+#define server_line_idx (15)
+#define http_method_idx (16)
+#define http_response_idx (17)
+#define last_hdr_idx (18)
 
   struct ndpi_int_one_line_struct line[NDPI_MAX_PARSE_LINES_PER_PACKET];
   struct ndpi_int_one_line_struct null_line,
@@ -843,6 +852,7 @@ struct ndpi_packet_struct {
 				  forwarded_line,
 				  referer_line,
 				  content_line,
+				  content_disposition_line,
 				  accept_line,
 				  user_agent_line,
 				  http_url_name,
@@ -987,6 +997,7 @@ typedef struct ndpi_proto_defaults {
   u_int8_t can_have_a_subprotocol;
   u_int16_t protoId, protoIdx;
   u_int16_t master_tcp_protoId[2], master_udp_protoId[2]; /* The main protocols on which this sub-protocol sits on */
+  u_int16_t tcp_default_ports[MAX_DEFAULT_PORTS], udp_default_ports[MAX_DEFAULT_PORTS];
   ndpi_protocol_breed_t protoBreed;
   void (*func) (struct ndpi_detection_module_struct *, struct ndpi_flow_struct *flow);
 } ndpi_proto_defaults_t;
@@ -1027,21 +1038,6 @@ typedef struct ndpi_proto {
 
 /* Needed to have access to HAVE_* defines */
 #include "ndpi_config.h"
-
-#ifdef HAVE_HYPERSCAN
-#include <hs/hs.h>
-
-struct hs_list {
-  char *expression;
-  unsigned int id;
-  struct hs_list *next;
-};
-
-struct hs {
-  hs_database_t *database;
-  hs_scratch_t  *scratch;
-};
-#endif
 
 #ifdef HAVE_PCRE
 #include <pcre.h>
@@ -1114,13 +1110,7 @@ struct ndpi_detection_module_struct {
   spinlock_t host_automa_lock;
 
   struct {
-#ifdef HAVE_HYPERSCAN
-    struct hs *hostnames;
-    unsigned int num_to_load;
-    struct hs_list *to_load;
-#else
     ndpi_automa hostnames, hostnames_shadow;
-#endif
     void *ipAddresses, *ipAddresses_shadow; /* Patricia */
     u_int8_t categories_loaded;
   } custom_categories;
@@ -1176,7 +1166,9 @@ struct ndpi_detection_module_struct {
   u_int8_t direction_detect_disable:1, /* disable internal detection of packet direction */
     _pad:7;
 
-  void *hyperscan; /* Intel Hyperscan */
+#ifdef CUSTOM_NDPI_PROTOCOLS
+  #include "../../../nDPI-custom/custom_ndpi_typedefs.h"
+#endif
 };
 
 #endif /* NDPI_LIB_COMPILATION */
@@ -1227,7 +1219,10 @@ struct ndpi_flow_struct {
   struct ndpi_id_struct *server_id;
   /* HTTP host or DNS query */
   u_char host_server_name[240];
-
+  u_int8_t initial_binary_bytes[8], initial_binary_bytes_len;
+  u_int8_t risk_checked;
+  u_int16_t risk; /* Issues found with this flow [bitmask of ndpi_risk] */
+  
   /*
     This structure below will not not stay inside the protos
     structure below as HTTP is used by many subprotocols
@@ -1273,8 +1268,8 @@ struct ndpi_flow_struct {
     struct {
       struct {
 	u_int16_t ssl_version, server_names_len;
-	char client_requested_server_name[64], *server_names, server_organization[64],
-	  *alpn, *tls_supported_versions;
+	char client_requested_server_name[64], *server_names,
+	  *alpn, *tls_supported_versions, *issuerDN, *subjectDN;
 	u_int32_t notBefore, notAfter;
 	char ja3_client[33], ja3_server[33];
 	u_int16_t server_cipher;
@@ -1418,10 +1413,7 @@ struct ndpi_flow_struct {
   /* NDPI_PROTOCOL_CSGO */
   u_int8_t csgo_strid[18],csgo_state,csgo_s2;
   u_int32_t csgo_id2;
-
-  /* NDPI_PROTOCOL_1KXUN || NDPI_PROTOCOL_IQIYI */
-  u_int16_t kxun_counter, iqiyi_counter;
-
+  
   /* internal structures to save functions calls */
   struct ndpi_packet_struct packet;
   struct ndpi_flow_struct *flow;
@@ -1430,14 +1422,14 @@ struct ndpi_flow_struct {
 };
 
 typedef struct {
-  char *string_to_match, *string2_to_match, *pattern_to_match, *proto_name;
+  char *string_to_match, *proto_name;
   int protocol_id;
   ndpi_protocol_category_t protocol_category;
   ndpi_protocol_breed_t protocol_breed;
 } ndpi_protocol_match;
 
 typedef struct {
-  char *string_to_match, *hyperscan_string_to_match;
+  char *string_to_match;
   ndpi_protocol_category_t protocol_category;
 } ndpi_category_match;
 

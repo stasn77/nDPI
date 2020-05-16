@@ -90,15 +90,15 @@
 /* { from mrt.h */
 
 typedef struct the_prefix4_t {
-  unsigned short family;		/* AF_INET | AF_INET6 */
-  unsigned short bitlen;		/* same as mask? */
+  u_int16_t family;		/* AF_INET | AF_INET6 */
+  u_int16_t bitlen;		/* same as mask? */
   int ref_count;		/* reference count */
   struct in_addr sin;
 } prefix4_t;
 
 typedef struct the_prefix_t {
-  unsigned short family;		/* AF_INET | AF_INET6 */
-  unsigned short bitlen;		/* same as mask? */
+  u_int16_t family;		/* AF_INET | AF_INET6 */
+  u_int16_t bitlen;		/* same as mask? */
   int ref_count;		/* reference count */
   union {
     struct in_addr sin;
@@ -113,11 +113,15 @@ typedef struct the_prefix_t {
 /* pointer to usr data (ex. route flap info) */
 union patricia_node_value_t {
   void *user_data;
-  unsigned int user_value;
+
+  /* User-defined values */
+  struct {
+    u_int16_t user_value, additional_user_value;
+  } uv;
 };
 
 typedef struct _patricia_node_t {
-  u_int bit;			/* flag if this node used */
+  u_int16_t bit;			/* flag if this node used */
   prefix_t *prefix;		/* who we are in patricia tree */
   struct _patricia_node_t *l, *r;	/* left and right children */
   struct _patricia_node_t *parent;/* may be used */
@@ -127,7 +131,7 @@ typedef struct _patricia_node_t {
 
 typedef struct _patricia_tree_t {
   patricia_node_t 	*head;
-  u_int		maxbits;	/* for IP, 32 bit addresses */
+  u_int16_t		maxbits;	/* for IP, 32 bit addresses */
   int num_active_node;		/* for debug purpose */
 } patricia_tree_t;
 
@@ -141,7 +145,7 @@ patricia_node_t * ndpi_patricia_search_best2 (patricia_tree_t *patricia, prefix_
 					      int inclusive);
 patricia_node_t *ndpi_patricia_lookup (patricia_tree_t *patricia, prefix_t *prefix);
 void ndpi_patricia_remove (patricia_tree_t *patricia, patricia_node_t *node);
-patricia_tree_t *ndpi_New_Patricia (int maxbits);
+patricia_tree_t *ndpi_New_Patricia (u_int16_t maxbits);
 void ndpi_Clear_Patricia (patricia_tree_t *patricia, void_fn_t func);
 void ndpi_Destroy_Patricia (patricia_tree_t *patricia, void_fn_t func);
 void ndpi_patricia_process (patricia_tree_t *patricia, void_fn2_t func);
